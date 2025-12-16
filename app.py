@@ -14,6 +14,14 @@ if not api_key:
 # 設定 Gemini
 genai.configure(api_key=api_key)
 
+# 側邊欄設定
+with st.sidebar:
+    st.title("設定")
+    system_instruction = st.text_area("系統指令 (System Instruction)", value="你是一個有用的 AI 助手")
+    if st.button("清除對話"):
+        st.session_state.messages = []
+        st.rerun()
+
 # 狀態管理：初始化對話紀錄
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -32,7 +40,7 @@ if prompt := st.chat_input("輸入你的問題..."):
 
     # 2. 呼叫 Gemini 模型
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=system_instruction)
         
         # 準備對話歷史以保持上下文 (將 Streamlit 格式轉換為 Gemini 格式)
         gemini_history = []
