@@ -15,5 +15,13 @@ else:
         
         # 3. 顯示成功訊息
         st.success("系統設置成功，API 連線測試中...")
+
+        if st.button("測試與 Gemini 的連線"):
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                response = model.generate_content("嗨，請用繁體中文跟我打招呼")
+                st.success(f"連線成功！模型回應：{response.text}")
+            except Exception as e:
+                st.error(f"連線失敗：{e}")
     except Exception as e:
         st.error(f"發生錯誤：{e}")
