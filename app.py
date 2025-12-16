@@ -22,6 +22,40 @@ def get_weather_data(api_key):
             return json.load(f)
             
     # 2. 如果沒有，才用 API 去抓
+    print(f"正在使用 Key: {api_key[:5]}... 下載資料")
+    params = {
+        "Authorization": api_key,
+        "downloadType": "WEB",
+        "format": "JSON"
+    }
+    try:
+        # =========== 修改重點在這裡 ===========
+        # 加上 verify=False 來略過憑證檢查
+        import urllib3
+        urllib3.disable_warnings() # 關閉討厭的警告訊息
+        
+        response = requests.get(API_URL, params=params, verify=False)
+        # ===================================
+        
+        if response.status_code == 200:
+            data = response.json()
+            # 存一份在本地
+            with open(JSON_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            return data
+        else:
+            st.error(f"下載失敗，HTTP 狀態碼: {response.status_code}")
+            return None
+    except Exception as e:
+        st.error(f"連線錯誤: {e}")
+        return None
+    """下載或讀取資料"""
+    # 1. 如果本地已經有 JSON，直接讀取
+    if os.path.exists(JSON_FILE):
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+            
+    # 2. 如果沒有，才用 API 去抓
     print(f"正在使用 Key: {api_key[:5]}... 下載資料") # Debug用
     params = {
         "Authorization": api_key,
