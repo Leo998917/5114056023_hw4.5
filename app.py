@@ -1,78 +1,103 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import cwa_crawler  # 匯入上面的爬蟲模組
+import json
+import requests
+import os
 
-# 設定頁面標題
+# ==========================================
+# 原本 cwa_crawler.py 的內容 (直接貼在這裡)
+# ==========================================
+
+DB_NAME = "data.db"
+JSON_FILE = "F-A0010-001.json"
+API_URL = "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-A0010-001"
+
+def get_weather_data(api_key=None):
+    # ... (這裡放原本 crawler 的 get_weather_data 函式內容) ...
+    # 為了節省篇幅，請把 cwa_crawler.py 的 get_weather_data 整段複製過來
+    if os.path.exists(JSON_FILE):
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    elif api_key:
+        params = {"Authorization": api_key, "downloadType": "WEB", "format": "JSON"}
+        response = requests.get(API_URL, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            with open(JSON_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            return data
+    return None
+
+def parse_and_save_to_db(data):
+    # ... (這裡放原本 crawler 的 parse_and_save_to_db 函式內容) ...
+    # 請把 cwa_crawler.py 的 parse_and_save_to_db 整段複製過來
+    if not data: return
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DROP TABLE IF EXISTS weather")
+    cursor.execute("""
+        CREATE TABLE weather (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location TEXT, min_temp TEXT, max_temp TEXT, description TEXT
+        )
+    """)
+    try:
+        locations = data['cwaopendata']['dataset']['location']
+        insert_list = []
+        for loc in locations:
+            city_name = loc['locationName']
+            wx, min_t, max_t = "N/A", "N/A", "N/A"
+            for elem in loc['weatherElement']:
+                elem_name = elem['elementName']
+                first_val = elem['time'][0]['parameter']['parameterName']
+                if elem_name == 'Wx': wx = first_val
+                elif elem_name == 'MinT': min_t = first_val
+                elif elem_name == 'MaxT': max_t = first_val
+            insert_list.append((city_name, min_t, max_t, wx))
+        cursor.executemany("INSERT INTO weather (location, min_temp, max_temp, description) VALUES (?, ?, ?, ?)", insert_list)
+        conn.commit()
+    except Exception as e:
+        print(e)
+    finally:
+        conn.close()
+
+# ==========================================
+# 原本 app.py 的 Streamlit 介面程式碼
+# ==========================================
+
 st.set_page_config(page_title="台灣天氣預報 Dashboard", page_icon="🌦️")
-
 st.title("🌦️ 台灣各縣市天氣預報 (CWA)")
 
-# --- 側邊欄設定 ---
 st.sidebar.header("功能選單")
 
-# 嘗試從 secrets 讀取 API Key
-try:
+# API Key 處理
+if "cwa" in st.secrets:
     api_key = st.secrets["cwa"]["api_key"]
-    st.sidebar.success("API Key 已從 Secrets 載入 ✅")
-except Exception:
+    st.sidebar.success("API Key 已載入 ✅")
+else:
     api_key = st.sidebar.text_input("請輸入 CWA API Key", type="password")
-    st.sidebar.warning("尚未設定 secrets.toml，請手動輸入")
 
-# 更新資料庫的按鈕
 if st.sidebar.button("🔄 更新/重抓 資料庫"):
     if not api_key:
-        st.error("請先設定 API Key 才能下載最新資料！")
+        st.error("請先設定 API Key！")
     else:
-        with st.spinner("正在向氣象局抓取資料並寫入 SQLite..."):
-            # 呼叫爬蟲模組的函式
-            raw_data = cwa_crawler.get_weather_data(api_key)
-            cwa_crawler.parse_and_save_to_db(raw_data)
-            st.success("資料庫更新完成！")
-            # 重新整理頁面以顯示新數據 (Streamlit 特性)
+        with st.spinner("更新中..."):
+            # 直接呼叫上面定義好的函式，不用 cwa_crawler. 了
+            raw_data = get_weather_data(api_key)
+            parse_and_save_to_db(raw_data)
+            st.success("完成！")
             st.rerun()
 
-# --- 主畫面：讀取 SQLite ---
-db_path = "data.db"
-
-def load_data():
-    try:
-        conn = sqlite3.connect(db_path)
-        # 直接讀取成 DataFrame
-        df = pd.read_sql("SELECT * FROM weather", conn)
-        conn.close()
-        return df
-    except Exception as e:
-        st.error(f"讀取資料庫失敗 (可能尚未建立): {e}")
-        return pd.DataFrame()
-
-df = load_data()
-
-if not df.empty:
-    # 顯示數據指標 (Metrics) - 稍微美化一下
-    st.subheader("📊 資料總覽")
-    col1, col2 = st.columns(2)
-    col1.metric("資料筆數", f"{len(df)} 筆")
-    col1.metric("資料來源", "中央氣象局 (CWA)")
+# 讀取 DB 顯示
+if os.path.exists(DB_NAME):
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql("SELECT * FROM weather", conn)
+    conn.close()
     
-    # 顯示表格
-    st.subheader("📋 詳細天氣列表")
-    # 整理一下欄位名稱顯示比較好看
-    display_df = df[['location', 'min_temp', 'max_temp', 'description']].copy()
-    display_df.columns = ['地區', '最低溫 (°C)', '最高溫 (°C)', '天氣狀況']
-    
-    st.dataframe(display_df, use_container_width=True)
-
-    # (選用) 簡單的圖表：如果溫度是數字的話
-    # 因為 JSON 裡有時是字串，這裡做個簡單轉換嘗試繪圖
-    try:
-        df['min_temp'] = pd.to_numeric(df['min_temp'])
-        df['max_temp'] = pd.to_numeric(df['max_temp'])
-        st.subheader("📈 氣溫分佈圖")
-        st.bar_chart(df.set_index('location')[['min_temp', 'max_temp']])
-    except:
-        st.info("溫度資料格式無法轉換為圖表，僅顯示表格。")
-
+    if not df.empty:
+        st.dataframe(df[['location', 'min_temp', 'max_temp', 'description']], use_container_width=True)
+    else:
+        st.warning("資料庫是空的")
 else:
-    st.warning("⚠️ 資料庫是空的或是找不到 `data.db`。")
-    st.info("請確認 `F-A0010-001.json` 存在，或在側邊欄輸入 API Key 並點擊「更新資料庫」。")
+    st.info("尚未建立資料庫，請點擊左側更新按鈕")
