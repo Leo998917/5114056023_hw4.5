@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+import PIL.Image
 
 # 1. 版面設定
 st.set_page_config(page_title="Gemini Chat", layout="centered")
@@ -41,6 +42,13 @@ with st.sidebar:
         height=150
     )
     
+    # 圖片上傳功能
+    uploaded_file = st.file_uploader("📸 上傳圖片 (可選)", type=['jpg', 'png', 'jpeg'])
+    img = None
+    if uploaded_file:
+        img = PIL.Image.open(uploaded_file)
+        st.image(img, caption="已上傳圖片", use_column_width=True)
+
     if st.button("🗑️ 清除對話"):
         st.session_state.messages = []
         st.rerun()
@@ -53,13 +61,21 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if "image" in message:
+            st.image(message["image"])
 
 # 8. 處理輸入與回應
 if prompt := st.chat_input("輸入你的問題..."):
     # 顯示使用者訊息
     with st.chat_message("user"):
         st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+        if img:
+            st.image(img)
+    
+    user_msg = {"role": "user", "content": prompt}
+    if img:
+        user_msg["image"] = img
+    st.session_state.messages.append(user_msg)
 
     # 呼叫 Gemini
     try:
@@ -70,10 +86,13 @@ if prompt := st.chat_input("輸入你的問題..."):
         )
         
         # 轉換歷史紀錄格式
-        gemini_history = [
-            {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-            for m in st.session_state.messages[:-1]
-        ]
+        gemini_history = []
+        for m in st.session_state.messages[:-1]:
+            role = "user" if m["role"] == "user" else "model"
+            parts = [m["content"]]
+            if "image" in m:
+                parts.append(m["image"])
+            gemini_history.append({"role": role, "parts": parts})
         
         chat = model.start_chat(history=gemini_history)
         
@@ -81,7 +100,11 @@ if prompt := st.chat_input("輸入你的問題..."):
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
             with st.spinner(f"Gemini ({target_model_name}) 正在思考..."):
-                response = chat.send_message(prompt)
+                # 判斷是否包含圖片傳送
+                if img:
+                    response = chat.send_message([prompt, img])
+                else:
+                    response = chat.send_message(prompt)
                 response_placeholder.markdown(response.text)
         
         st.session_state.messages.append({"role": "assistant", "content": response.text})
