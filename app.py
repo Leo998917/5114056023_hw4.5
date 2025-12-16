@@ -7,23 +7,52 @@ import os
 import urllib3
 
 # ==========================================
-# 核心功能區
+# 設定區
 # ==========================================
 
 DB_NAME = "data.db"
 JSON_FILE = "F-A0010-001.json"
 API_URL = "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-A0010-001"
 
+# ==========================================
+# 核心功能：全自動搜尋資料
+# ==========================================
+
+def find_location_list(data):
+    """
+    通用搜尋功能：
+    不指定固定路徑，而是遞迴搜尋整個 JSON，
+    找到第一個包含 'locationName' 的列表就回傳。
+    """
+    if isinstance(data, dict):
+        # 如果這一層有 'locationName'，那它的上一層(List)應該就是我們要的，但這裡是 Dict，所以繼續往下找
+        for key, value in data.items():
+            result = find_location_list(value)
+            if result:
+                return result
+    elif isinstance(data, list):
+        # 如果這是一個列表，檢查裡面的第一個元素是否包含 'locationName'
+        if len(data) > 0 and isinstance(data[0], dict) and 'locationName' in data[0]:
+            return data
+        # 如果不是，繼續對列表裡的每個元素做搜尋
+        for item in data:
+            result = find_location_list(item)
+            if result:
+                return result
+    return None
+
 def get_weather_data(api_key):
-    """下載或讀取資料"""
+    """下載資料 (含 SSL 修正)"""
+    # 1. 優先讀取本地檔案
     if os.path.exists(JSON_FILE):
         try:
             with open(JSON_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except:
-            os.remove(JSON_FILE)
+            os.remove(JSON_FILE) # 壞檔重抓
             
-    print(f"正在使用 Key: {api_key[:5]}... 下載資料")
+    # 2. API 下載
+    st.info(f"正在連線 CWA 下載資料...")
     params = {
         "Authorization": api_key,
         "downloadType": "WEB",
@@ -50,7 +79,7 @@ def get_weather_data(api_key):
         return None
 
 def parse_and_save_to_db(data):
-    """解析並存入 SQLite (支援多種 JSON 結構)"""
+    """解析並存入 SQLite"""
     if not data: return False
 
     conn = sqlite3.connect(DB_NAME)
@@ -65,46 +94,24 @@ def parse_and_save_to_db(data):
     """)
 
     try:
-        # --- 智慧路徑搜尋 ---
-        locations = []
-        root = data.get('cwaopendata', {})
+        # === 使用通用搜尋功能 ===
+        locations = find_location_list(data)
         
-        # 1. 嘗試標準路徑 (dataset -> location)
-        if 'dataset' in root and 'location' in root['dataset']:
-            locations = root['dataset']['location']
-            
-        # 2. 嘗試資源路徑 (resources -> resource -> data -> locations -> location)
-        # 針對 F-A0010-001 (農業預報)
-        elif 'resources' in root:
-            try:
-                # 這裡路徑比較深，我們要一層一層挖
-                res = root['resources']['resource']
-                # 有時候 data 是 siblings，看截圖推測結構
-                if 'data' in res:
-                    if 'locations' in res['data'] and 'location' in res['data']['locations']:
-                        locations = res['data']['locations']['location']
-                    elif 'location' in res['data']:
-                        locations = res['data']['location']
-            except Exception as e:
-                st.warning(f"嘗試解析 resources 路徑時失敗: {e}")
-
         if not locations:
-            st.error("❌ 解析失敗：找不到 'location' 列表")
-            st.info("👇 目前抓到的資料結構 (根目錄 keys):")
-            st.write(list(root.keys()))
-            if 'resources' in root:
-                st.info("👇 Resources 內部結構:")
-                st.json(root['resources'])
+            st.error("❌ 解析失敗：在整份 JSON 裡都找不到含有 'locationName' 的資料列表")
+            st.info("可能是 API Key 權限不符，或下載到了錯誤的資料集。")
+            st.json(data) # 印出結構供檢查
             return False
 
-        # --- 開始提取資料 ---
+        st.toast(f"✅ 成功找到 {len(locations)} 筆地點資料！", icon="🎉")
+
+        # === 開始提取資料 ===
         insert_list = []
         for loc in locations:
             city_name = loc.get('locationName', '未知')
             wx, min_t, max_t = "N/A", "N/A", "N/A"
             
-            # 處理 weatherElement
-            # 注意：農業預報的 element 結構可能也跟一般不同，這裡做一個通用嘗試
+            # 嘗試抓取 weatherElement
             elements = loc.get('weatherElement', [])
             for elem in elements:
                 elem_name = elem.get('elementName')
@@ -112,26 +119,24 @@ def parse_and_save_to_db(data):
                 
                 if not time_list: continue
                 
-                # 嘗試取出數值，這裡做多重保險
                 try:
+                    # 抓取第一筆時間資料
                     first_time = time_list[0]
                     val = "N/A"
                     
-                    # 情況 A: parameter -> parameterName (一般預報)
+                    # 處理各種可能的數值結構 (parameter 或 elementValue)
                     if 'parameter' in first_time:
                          val = first_time['parameter'].get('parameterName', 'N/A')
-                    # 情況 B: elementValue -> value (農業/其他預報)
                     elif 'elementValue' in first_time:
-                        # 有可能是 list 或 dict
                         ev = first_time['elementValue']
                         if isinstance(ev, list) and len(ev) > 0:
                             val = ev[0].get('value', 'N/A')
                         elif isinstance(ev, dict):
                             val = ev.get('value', 'N/A')
                     
-                    # 對應欄位
+                    # 對應欄位 (支援一般預報與農業預報的欄位名稱)
                     if elem_name == 'Wx': wx = val
-                    elif elem_name in ['MinT', 'T']: min_t = val # 農業預報有時是 T (平均溫)
+                    elif elem_name in ['MinT', 'T']: min_t = val
                     elif elem_name in ['MaxT']: max_t = val
                 except:
                     continue
@@ -143,8 +148,7 @@ def parse_and_save_to_db(data):
         return True
 
     except Exception as e:
-        st.error(f"❌ 發生未預期的錯誤: {e}")
-        st.write(data) # 印出資料幫忙除錯
+        st.error(f"❌ 資料庫寫入錯誤: {e}")
         return False
     finally:
         conn.close()
@@ -176,8 +180,8 @@ if st.sidebar.button("🔄 更新/重抓 資料庫"):
     if not api_key:
         st.error("❌ 沒有 API Key，無法下載！")
     else:
-        with st.spinner("正在連線中央氣象局..."):
-            # 強制刪除舊檔
+        with st.spinner("正在連線並搜尋資料..."):
+            # 強制刪除舊檔，確保使用最新邏輯解析
             if os.path.exists(JSON_FILE):
                 os.remove(JSON_FILE)
             
