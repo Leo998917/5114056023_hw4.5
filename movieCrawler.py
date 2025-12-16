@@ -1,58 +1,65 @@
-# ... (上面是原本 Part 1 的天氣程式碼) ...
+import requests
+from bs4 import BeautifulSoup
+import time
+import random
 
-# ==========================================
-# Part 2: 電影爬蟲整合區
-# ==========================================
-import movieCrawler  # 匯入你寫好的爬蟲模組
+# 設定目標網站基礎網址
+BASE_URL = "https://ssr1.scrape.center/page/{}"
 
-st.markdown("---")
-st.header("🎬 Part 2：電影網站爬蟲")
-
-if st.button("🕷️ 開始爬取電影資料 (10頁)"):
-    # 建立一個進度條
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+def fetch_page(page_number):
+    """爬取單一頁面的 HTML"""
+    url = BASE_URL.format(page_number)
+    print(f"📥 正在爬取第 {page_number} 頁: {url}")
     
-    # 為了在 Streamlit 顯示進度，我們稍微修改一下呼叫方式
-    # 這裡直接呼叫 movieCrawler 的功能
     try:
-        import urllib3
-        urllib3.disable_warnings()
-        
-        all_movies = []
-        status_text.text("🚀 爬蟲啟動中...")
-        
-        for page in range(1, 11):
-            # 更新進度
-            status_text.text(f"📥 正在爬取第 {page}/10 頁...")
-            progress_bar.progress(page * 10)
-            
-            # 呼叫爬蟲函式
-            html = movieCrawler.fetch_page(page)
-            if html:
-                movies = movieCrawler.parse_html(html)
-                all_movies.extend(movies)
-            
-            # 休息一下
-            import time
-            import random
-            time.sleep(random.uniform(0.5, 1))
-            
-        status_text.success(f"✅ 爬取完成！共抓到 {len(all_movies)} 筆資料")
-        
-        # 轉成 DataFrame 顯示
-        if all_movies:
-            df_movie = pd.DataFrame(all_movies)
-            st.dataframe(df_movie)
-            
-            # 製作 CSV 下載按鈕
-            csv = df_movie.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 下載 movie.csv",
-                data=csv,
-                file_name='movie.csv',
-                mime='text/csv',
-            )
-            
+        # verify=False 防止 SSL 錯誤
+        response = requests.get(url, verify=False) 
+        if response.status_code == 200:
+            return response.text
+        else:
+            return None
     except Exception as e:
-        st.error(f"爬蟲發生錯誤: {e}")
+        print(f"❌ 連線發生錯誤: {e}")
+        return None
+
+def parse_html(html):
+    """解析 HTML 並提取電影資訊"""
+    soup = BeautifulSoup(html, "html.parser")
+    movies = []
+    
+    items = soup.find_all(class_="el-card")
+    
+    for item in items:
+        try:
+            # 1. 電影名稱
+            title_tag = item.find("h2")
+            title = title_tag.text.strip() if title_tag else "N/A"
+            
+            # 2. 圖片 URL
+            img_tag = item.find("img", class_="cover")
+            cover_url = img_tag["src"] if img_tag else "N/A"
+            
+            # 3. 評分
+            score_tag = item.find(class_="score")
+            score = score_tag.text.strip() if score_tag else "N/A"
+            
+            # 4. 類型
+            categories_tag = item.find(class_="categories")
+            if categories_tag:
+                cats = [btn.text.strip() for btn in categories_tag.find_all("button")]
+                category = ", ".join(cats)
+            else:
+                category = "N/A"
+            
+            movie_data = {
+                "Title": title,
+                "Cover URL": cover_url,
+                "Score": score,
+                "Category": category
+            }
+            movies.append(movie_data)
+            
+        except Exception as e:
+            continue
+            
+    return movies
