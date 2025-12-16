@@ -40,8 +40,8 @@ if prompt := st.chat_input("輸入你的問題..."):
 
     # 2. 呼叫 Gemini 模型
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=system_instruction)
-        
+        #model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=system_instruction)
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
         # 準備對話歷史以保持上下文 (將 Streamlit 格式轉換為 Gemini 格式)
         gemini_history = []
         for msg in st.session_state.messages[:-1]:
