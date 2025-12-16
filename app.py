@@ -1,113 +1,122 @@
 import streamlit as st
-import google.generativeai as genai
-import PIL.Image
+import requests
+import sqlite3
+import pandas as pd
+import os
 
-# 1. 版面設定
-st.set_page_config(page_title="Gemini Chat", layout="centered")
+# --- 設定區 ---
+API_KEY = "CWA-1FFDDAEC-161F-46A3-BE71-93C32C52829F"
+# 這是你提供的作業 JSON URL
+JSON_URL = f"https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-A0010-001?Authorization={API_KEY}&downloadType=WEB&format=JSON"
+DB_NAME = "data.db"
 
-# 2. 安全性檢查
-api_key = st.secrets.get("GOOGLE_API_KEY")
-if not api_key:
-    st.error("❌ 錯誤：未偵測到 API Key。請檢查 .streamlit/secrets.toml 是否已建立。")
-    st.stop()
-
-# 3. 設定 Gemini
-genai.configure(api_key=api_key)
-
-# 4. 自動偵測可用模型 (關鍵修正：不再手動寫死名稱)
-try:
-    # 找出所有支援 'generateContent' 的模型
-    available_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    if not available_models:
-        st.error("❌ 您的 API Key 沒有可用的模型權限。")
-        st.stop()
+def fetch_and_save_data():
+    """下載資料、解析並存入 SQLite (作業步驟 1~4)"""
     
-    # 直接選用列表中的第一個模型 (通常是 gemini-1.5-flash 或 gemini-pro)
-    # 這樣做保證模型名稱絕對正確，因為是 API 自己告訴我們的
-    target_model_name = available_models[0].name
+    # 1️⃣ 下載 JSON 資料
+    response = requests.get(JSON_URL)
+    if response.status_code != 200:
+        st.error(f"下載失敗，狀態碼：{response.status_code}")
+        return False
     
-except Exception as e:
-    st.error(f"❌ 無法取得模型清單，請檢查 API Key 或網路連線：{e}")
-    st.stop()
-
-# 5. 側邊欄設定
-with st.sidebar:
-    st.title("🔧 設定")
-    # 顯示目前自動選到的模型，讓你心裡有數
-    st.caption(f"目前使用模型：`{target_model_name}`")
+    data = response.json()
     
-    system_instruction = st.text_area(
-        "系統指令 (System Instruction)", 
-        value="你是一個繁體中文的 AI 助手，回答請簡潔有力。",
-        height=150
-    )
-    
-    # 圖片上傳功能
-    uploaded_file = st.file_uploader("📸 上傳圖片 (可選)", type=['jpg', 'png', 'jpeg'])
-    img = None
-    if uploaded_file:
-        img = PIL.Image.open(uploaded_file)
-        st.image(img, caption="已上傳圖片", use_column_width=True)
+    # 建立資料列表準備寫入
+    weather_records = []
 
-    if st.button("🗑️ 清除對話"):
-        st.session_state.messages = []
-        st.rerun()
-
-# 6. 狀態管理
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# 7. 顯示歷史訊息
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if "image" in message:
-            st.image(message["image"])
-
-# 8. 處理輸入與回應
-if prompt := st.chat_input("輸入你的問題..."):
-    # 顯示使用者訊息
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        if img:
-            st.image(img)
-    
-    user_msg = {"role": "user", "content": prompt}
-    if img:
-        user_msg["image"] = img
-    st.session_state.messages.append(user_msg)
-
-    # 呼叫 Gemini
     try:
-        # 初始化模型 (加入 system_instruction)
-        model = genai.GenerativeModel(
-            target_model_name, 
-            system_instruction=system_instruction
-        )
+        # 2️⃣ 解析資料 (針對 F-A0010-001 的結構)
+        # 資料結構通常是: cwaopendata -> dataset -> locations -> location (list)
+        locations = data['cwaopendata']['dataset']['locations']['location']
         
-        # 轉換歷史紀錄格式
-        gemini_history = []
-        for m in st.session_state.messages[:-1]:
-            role = "user" if m["role"] == "user" else "model"
-            parts = [m["content"]]
-            if "image" in m:
-                parts.append(m["image"])
-            gemini_history.append({"role": role, "parts": parts})
-        
-        chat = model.start_chat(history=gemini_history)
-        
-        # 顯示 AI 思考中的狀態
-        with st.chat_message("assistant"):
-            response_placeholder = st.empty()
-            with st.spinner(f"Gemini ({target_model_name}) 正在思考..."):
-                # 判斷是否包含圖片傳送
-                if img:
-                    response = chat.send_message([prompt, img])
-                else:
-                    response = chat.send_message(prompt)
-                response_placeholder.markdown(response.text)
-        
-        st.session_state.messages.append({"role": "assistant", "content": response.text})
+        for loc in locations:
+            city_name = loc.get('locationName', '未知') # 這裡通常是縣市或鄉鎮名
+            
+            # 初始化變數
+            min_t = None
+            max_t = None
+            desc = None
+            
+            # 取出天氣元素 (Wx, MinT, MaxT)
+            # 我們只取「第一個時段」(time[0]) 做為示範
+            for element in loc['weatherElement']:
+                ele_name = element['elementName']
+                # 確保有時間區段資料
+                if element['time']:
+                    first_slot = element['time'][0]
+                    value = first_slot['elementValue']['value']
+                    
+                    if ele_name == 'MinT':
+                        min_t = value
+                    elif ele_name == 'MaxT':
+                        max_t = value
+                    elif ele_name == 'Wx': # 天氣現象描述
+                        desc = value
+            
+            # 整理一筆資料
+            weather_records.append((city_name, min_t, max_t, desc))
+            
+    except KeyError as e:
+        st.error(f"JSON 解析錯誤，欄位結構可能改變: {e}")
+        return False
 
-    except Exception as e:
-        st.error(f"發生錯誤：{e}")
+    # 3️⃣ & 4️⃣ 設計資料庫並寫入 SQLite3
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # 建立 Table (如果不存在)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS weather (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location TEXT,
+            min_temp REAL,
+            max_temp REAL,
+            description TEXT
+        )
+    ''')
+    
+    # 為了避免重複執行導致資料無限增加，我們先清空舊資料 (作業通常希望每次跑都是最新的)
+    c.execute('DELETE FROM weather')
+    
+    # 寫入資料
+    c.executemany('INSERT INTO weather (location, min_temp, max_temp, description) VALUES (?, ?, ?, ?)', weather_records)
+    
+    conn.commit()
+    conn.close()
+    
+    return True
+
+# --- Streamlit 介面區 (作業步驟 5) ---
+
+st.title("🌤️ 台灣各地鄉鎮天氣預報 (作業 Part 1)")
+
+# 建立一個按鈕來觸發「下載與更新資料庫」的動作
+if st.button("更新資料庫 (從 CWA API 下載)"):
+    with st.spinner("正在下載並解析資料..."):
+        success = fetch_and_save_data()
+        if success:
+            st.success("✅ 資料庫更新成功！已存入 data.db")
+        else:
+            st.error("❌ 更新失敗")
+
+# 5️⃣ 顯示從 SQLite 讀出的資料表格
+if os.path.exists(DB_NAME):
+    st.subheader("📊 資料庫內容預覽")
+    
+    # 連接資料庫讀取資料
+    conn = sqlite3.connect(DB_NAME)
+    
+    # 使用 Pandas 讀取 SQL (這是顯示表格最快的方法)
+    df = pd.read_sql("SELECT * FROM weather", conn)
+    conn.close()
+    
+    if not df.empty:
+        # 顯示 Dataframe
+        st.dataframe(df, use_container_width=True)
+        
+        # 額外加分題：簡單的統計數據
+        st.info(f"目前資料庫中共有 {len(df)} 筆鄉鎮天氣資料。")
+    else:
+        st.warning("資料庫是空的，請點擊上方按鈕更新資料。")
+else:
+    st.warning("找不到 data.db，請點擊上方按鈕建立資料庫。")
