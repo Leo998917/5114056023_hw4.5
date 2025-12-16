@@ -7,7 +7,7 @@ import os
 import urllib3
 
 # ==========================================
-# 核心功能區 (爬蟲 + 資料庫)
+# 核心功能區
 # ==========================================
 
 DB_NAME = "data.db"
@@ -15,56 +15,42 @@ JSON_FILE = "F-A0010-001.json"
 API_URL = "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-A0010-001"
 
 def get_weather_data(api_key):
-    """下載或讀取資料 (含 SSL 修正 + 強制除錯)"""
-    
-    # 1. 如果本地已經有 JSON，先讀讀看
+    """下載或讀取資料"""
     if os.path.exists(JSON_FILE):
         try:
             with open(JSON_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except json.JSONDecodeError:
-            os.remove(JSON_FILE) # 壞檔就刪
+        except:
+            os.remove(JSON_FILE)
             
-    # 2. 用 API 去抓
-    st.info(f"正在嘗試連線 CWA 下載資料 (Key 前 5 碼: {api_key[:5]})...")
+    print(f"正在使用 Key: {api_key[:5]}... 下載資料")
     params = {
         "Authorization": api_key,
         "downloadType": "WEB",
         "format": "JSON"
     }
     try:
-        # =========== SSL 憑證修正 ===========
         urllib3.disable_warnings() 
         response = requests.get(API_URL, params=params, verify=False)
-        # ===================================
         
         if response.status_code == 200:
             try:
                 data = response.json()
+                with open(JSON_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+                return data
             except:
-                st.error("❌ 下載內容不是有效的 JSON (可能是 HTML 錯誤頁面)")
-                st.text(response.text[:500]) # 印出前500字看看到底是什麼
+                st.error("❌ 下載內容不是有效的 JSON")
                 return None
-            
-            # 寫入檔案前，先確認這是不是錯誤訊息
-            # 如果裡面沒有 cwaopendata，或者有 success: false，可能就是報錯
-            if 'cwaopendata' not in data:
-                st.warning("⚠️ 警告：伺服器回傳了 JSON，但結構看起來不像天氣資料。")
-                
-            # 存檔
-            with open(JSON_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-            return data
         else:
-            st.error(f"❌ 下載失敗，HTTP 狀態碼: {response.status_code}")
-            st.text(f"錯誤回應: {response.text}")
+            st.error(f"❌ 下載失敗，狀態碼: {response.status_code}")
             return None
     except Exception as e:
-        st.error(f"❌ 連線嚴重錯誤: {e}")
+        st.error(f"❌ 連線錯誤: {e}")
         return None
 
 def parse_and_save_to_db(data):
-    """解析並存入 SQLite (含詳細除錯訊息)"""
+    """解析並存入 SQLite (支援多種 JSON 結構)"""
     if not data: return False
 
     conn = sqlite3.connect(DB_NAME)
@@ -79,59 +65,86 @@ def parse_and_save_to_db(data):
     """)
 
     try:
-        # --- 除錯檢測區 ---
-        # 1. 檢查根目錄
-        if 'cwaopendata' not in data:
-            st.error("❌ 解析失敗：JSON 根目錄找不到 'cwaopendata'")
-            st.error("👇 這是伺服器回傳的內容，請檢查是否有 Error Message：")
-            st.json(data) # 直接把內容印出來給你看
-            return False
-
-        # 2. 檢查 dataset
-        if 'dataset' not in data['cwaopendata']:
-            st.error("❌ 解析失敗：在 'cwaopendata' 裡面找不到 'dataset'")
-            st.error("👇 這通常代表 API Key 有誤或權限不足，伺服器回傳了錯誤報告：")
-            st.json(data) # 直接把內容印出來給你看
-            return False
-        # ----------------
-
-        locations = data['cwaopendata']['dataset']['location']
-        insert_list = []
+        # --- 智慧路徑搜尋 ---
+        locations = []
+        root = data.get('cwaopendata', {})
         
+        # 1. 嘗試標準路徑 (dataset -> location)
+        if 'dataset' in root and 'location' in root['dataset']:
+            locations = root['dataset']['location']
+            
+        # 2. 嘗試資源路徑 (resources -> resource -> data -> locations -> location)
+        # 針對 F-A0010-001 (農業預報)
+        elif 'resources' in root:
+            try:
+                # 這裡路徑比較深，我們要一層一層挖
+                res = root['resources']['resource']
+                # 有時候 data 是 siblings，看截圖推測結構
+                if 'data' in res:
+                    if 'locations' in res['data'] and 'location' in res['data']['locations']:
+                        locations = res['data']['locations']['location']
+                    elif 'location' in res['data']:
+                        locations = res['data']['location']
+            except Exception as e:
+                st.warning(f"嘗試解析 resources 路徑時失敗: {e}")
+
+        if not locations:
+            st.error("❌ 解析失敗：找不到 'location' 列表")
+            st.info("👇 目前抓到的資料結構 (根目錄 keys):")
+            st.write(list(root.keys()))
+            if 'resources' in root:
+                st.info("👇 Resources 內部結構:")
+                st.json(root['resources'])
+            return False
+
+        # --- 開始提取資料 ---
+        insert_list = []
         for loc in locations:
-            city_name = loc['locationName']
+            city_name = loc.get('locationName', '未知')
             wx, min_t, max_t = "N/A", "N/A", "N/A"
             
-            for elem in loc['weatherElement']:
-                elem_name = elem['elementName']
+            # 處理 weatherElement
+            # 注意：農業預報的 element 結構可能也跟一般不同，這裡做一個通用嘗試
+            elements = loc.get('weatherElement', [])
+            for elem in elements:
+                elem_name = elem.get('elementName')
+                time_list = elem.get('time', [])
+                
+                if not time_list: continue
+                
+                # 嘗試取出數值，這裡做多重保險
                 try:
-                    # 嘗試抓取數值
-                    if elem['time']:
-                        first_val = elem['time'][0]['parameter']['parameterName']
-                        if elem_name == 'Wx': wx = first_val
-                        elif elem_name == 'MinT': min_t = first_val
-                        elif elem_name == 'MaxT': max_t = first_val
+                    first_time = time_list[0]
+                    val = "N/A"
+                    
+                    # 情況 A: parameter -> parameterName (一般預報)
+                    if 'parameter' in first_time:
+                         val = first_time['parameter'].get('parameterName', 'N/A')
+                    # 情況 B: elementValue -> value (農業/其他預報)
+                    elif 'elementValue' in first_time:
+                        # 有可能是 list 或 dict
+                        ev = first_time['elementValue']
+                        if isinstance(ev, list) and len(ev) > 0:
+                            val = ev[0].get('value', 'N/A')
+                        elif isinstance(ev, dict):
+                            val = ev.get('value', 'N/A')
+                    
+                    # 對應欄位
+                    if elem_name == 'Wx': wx = val
+                    elif elem_name in ['MinT', 'T']: min_t = val # 農業預報有時是 T (平均溫)
+                    elif elem_name in ['MaxT']: max_t = val
                 except:
                     continue
             
             insert_list.append((city_name, min_t, max_t, wx))
 
-        if not insert_list:
-            st.warning("⚠️ 解析完成，但沒有抓到任何地點資料 (List 是空的)")
-            return False
-
         cursor.executemany("INSERT INTO weather (location, min_temp, max_temp, description) VALUES (?, ?, ?, ?)", insert_list)
         conn.commit()
         return True
 
-    except KeyError as e:
-        st.error(f"❌ 解析過程中發生 Key 錯誤: {e}")
-        st.json(data) # 出錯時印出資料
-        if os.path.exists(JSON_FILE):
-            os.remove(JSON_FILE) # 刪除壞檔
-        return False
     except Exception as e:
         st.error(f"❌ 發生未預期的錯誤: {e}")
+        st.write(data) # 印出資料幫忙除錯
         return False
     finally:
         conn.close()
@@ -164,7 +177,7 @@ if st.sidebar.button("🔄 更新/重抓 資料庫"):
         st.error("❌ 沒有 API Key，無法下載！")
     else:
         with st.spinner("正在連線中央氣象局..."):
-            # 強制刪除舊檔，確保我們看到的是最新的錯誤訊息
+            # 強制刪除舊檔
             if os.path.exists(JSON_FILE):
                 os.remove(JSON_FILE)
             
