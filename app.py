@@ -1,41 +1,52 @@
 import streamlit as st
 import google.generativeai as genai
 
-# 1. 嘗試從 Streamlit Secrets 安全讀取 API Key
-# 這樣做的好處是本地開發用 secrets.toml，部署到 Streamlit Cloud 則用後台設定，程式碼完全不用改
+# 版面設定
+st.set_page_config(page_title="Gemini Chat")
+
+# 安全性保持：讀取 API Key
 api_key = st.secrets.get("GOOGLE_API_KEY")
 
-# 2. 簡單的檢查邏輯
 if not api_key:
     st.error("❌ 錯誤：未偵測到 API Key。請檢查 .streamlit/secrets.toml 是否已建立。")
-else:
+    st.stop()
+
+# 設定 Gemini
+genai.configure(api_key=api_key)
+
+# 狀態管理：初始化對話紀錄
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 顯示歷史訊息
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# 處理輸入與回應
+if prompt := st.chat_input("輸入你的問題..."):
+    # 1. 顯示並儲存使用者訊息
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 2. 呼叫 Gemini 模型
     try:
-        # 嘗試配置 (僅做設定，尚未發送請求)
-        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # 3. 顯示成功訊息
-        st.success("系統設置成功，API 連線測試中...")
+        # 準備對話歷史以保持上下文 (將 Streamlit 格式轉換為 Gemini 格式)
+        gemini_history = []
+        for msg in st.session_state.messages[:-1]:
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_history.append({"role": role, "parts": [msg["content"]]})
+        
+        chat = model.start_chat(history=gemini_history)
+        response = chat.send_message(prompt)
+        
+        # 3. 顯示並儲存 AI 回應
+        with st.chat_message("assistant"):
+            st.markdown(response.text)
+        st.session_state.messages.append({"role": "assistant", "content": response.text})
 
-        if st.button("測試與 Gemini 的連線"):
-            try:
-                # 1. 找出所有支援 generateContent 的模型
-                available_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                model_names = [m.name for m in available_models]
-                
-                # 2. 印出模型清單
-                st.write("您的 API Key 可用的模型清單：")
-                st.code(model_names)
-
-                if model_names:
-                    # 3. 自動選擇第一個模型進行測試
-                    target_model = model_names[0]
-                    st.info(f"自動選擇測試模型：{target_model}")
-                    model = genai.GenerativeModel(target_model)
-                    response = model.generate_content("嗨，請用繁體中文跟我打招呼")
-                    st.success(f"連線成功！模型回應：{response.text}")
-                else:
-                    st.error("找不到任何支援 generateContent 的模型，請檢查 API Key 權限。")
-            except Exception as e:
-                st.error(f"連線失敗：{e}")
     except Exception as e:
         st.error(f"發生錯誤：{e}")
