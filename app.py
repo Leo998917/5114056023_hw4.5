@@ -4,6 +4,7 @@ import pandas as pd
 import json
 import requests
 import os
+import urllib3
 
 # ==========================================
 # 核心功能區 (爬蟲 + 資料庫)
@@ -11,15 +12,19 @@ import os
 
 DB_NAME = "data.db"
 JSON_FILE = "F-A0010-001.json"
-# 使用 API 的網址
 API_URL = "https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-A0010-001"
 
 def get_weather_data(api_key):
-    """下載或讀取資料"""
+    """下載或讀取資料 (含 SSL 修正)"""
     # 1. 如果本地已經有 JSON，直接讀取
     if os.path.exists(JSON_FILE):
-        with open(JSON_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(JSON_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            # 如果檔案內容壞掉 (不是 JSON)，就刪掉它
+            os.remove(JSON_FILE)
+            return None
             
     # 2. 如果沒有，才用 API 去抓
     print(f"正在使用 Key: {api_key[:5]}... 下載資料")
@@ -29,49 +34,26 @@ def get_weather_data(api_key):
         "format": "JSON"
     }
     try:
-        # =========== 修改重點在這裡 ===========
-        # 加上 verify=False 來略過憑證檢查
-        import urllib3
-        urllib3.disable_warnings() # 關閉討厭的警告訊息
-        
+        # =========== SSL 憑證修正 ===========
+        urllib3.disable_warnings() # 關閉警告
         response = requests.get(API_URL, params=params, verify=False)
         # ===================================
         
         if response.status_code == 200:
-            data = response.json()
+            # 檢查是否為有效的 JSON
+            try:
+                data = response.json()
+            except:
+                st.error("下載內容不是有效的 JSON 格式")
+                return None
+                
             # 存一份在本地
             with open(JSON_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
             return data
         else:
             st.error(f"下載失敗，HTTP 狀態碼: {response.status_code}")
-            return None
-    except Exception as e:
-        st.error(f"連線錯誤: {e}")
-        return None
-    """下載或讀取資料"""
-    # 1. 如果本地已經有 JSON，直接讀取
-    if os.path.exists(JSON_FILE):
-        with open(JSON_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-            
-    # 2. 如果沒有，才用 API 去抓
-    print(f"正在使用 Key: {api_key[:5]}... 下載資料") # Debug用
-    params = {
-        "Authorization": api_key,
-        "downloadType": "WEB",
-        "format": "JSON"
-    }
-    try:
-        response = requests.get(API_URL, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            # 存一份在本地
-            with open(JSON_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-            return data
-        else:
-            st.error(f"下載失敗，HTTP 狀態碼: {response.status_code}")
+            st.write(response.text) # 顯示錯誤內容幫助除錯
             return None
     except Exception as e:
         st.error(f"連線錯誤: {e}")
@@ -94,8 +76,23 @@ def parse_and_save_to_db(data):
     """)
 
     try:
+        # 嘗試解析結構
+        # 先檢查最外層是否有 cwaopendata
+        if 'cwaopendata' not in data:
+            st.error(f"JSON 結構錯誤：找不到 'cwaopendata'。目前的 Keys: {list(data.keys())}")
+            # 如果抓到錯誤訊息 (例如 {success: false, message: ...})
+            if 'message' in data:
+                st.warning(f"API 回傳訊息: {data['message']}")
+            return False
+
+        # 再檢查是否有 dataset
+        if 'dataset' not in data['cwaopendata']:
+            st.error(f"JSON 結構錯誤：在 'cwaopendata' 下找不到 'dataset'。")
+            return False
+
         locations = data['cwaopendata']['dataset']['location']
         insert_list = []
+        
         for loc in locations:
             city_name = loc['locationName']
             wx, min_t, max_t = "N/A", "N/A", "N/A"
@@ -116,8 +113,16 @@ def parse_and_save_to_db(data):
         cursor.executemany("INSERT INTO weather (location, min_temp, max_temp, description) VALUES (?, ?, ?, ?)", insert_list)
         conn.commit()
         return True
+
+    except KeyError as e:
+        st.error(f"解析資料錯誤 (KeyError): {e}")
+        # 如果解析失敗，刪除本地 JSON 檔，強制下次重抓
+        if os.path.exists(JSON_FILE):
+            os.remove(JSON_FILE)
+            st.info("已刪除可能損壞的 JSON 檔案，請再試一次更新。")
+        return False
     except Exception as e:
-        st.error(f"解析資料錯誤: {e}")
+        st.error(f"發生未預期的錯誤: {e}")
         return False
     finally:
         conn.close()
@@ -131,13 +136,10 @@ st.title("🌦️ 台灣各縣市天氣預報 (CWA)")
 
 st.sidebar.header("功能選單")
 
-# --- 修正後的 API Key 讀取邏輯 ---
+# --- API Key 讀取邏輯 ---
 api_key = None
-
-# 1. 先找有沒有 [cwa] 下的 api_key
 if "cwa" in st.secrets and "api_key" in st.secrets["cwa"]:
     api_key = st.secrets["cwa"]["api_key"]
-# 2. 再找有沒有直接寫在根目錄的 api_key
 elif "api_key" in st.secrets:
     api_key = st.secrets["api_key"]
 
