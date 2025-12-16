@@ -1,70 +1,71 @@
 import streamlit as st
-import requests
 import sqlite3
 import pandas as pd
+import json
 import os
 
 # --- 設定區 ---
-API_KEY = "CWA-1FFDDAEC-161F-46A3-BE71-93C32C52829F"
-# 這是你提供的作業 JSON URL
-JSON_URL = f"https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/F-A0010-001?Authorization={API_KEY}&downloadType=WEB&format=JSON"
+JSON_FILE_NAME = "F-A0010-001.json"  # 請確認你的 JSON 檔名完全一樣
 DB_NAME = "data.db"
 
-def fetch_and_save_data():
-    """下載資料、解析並存入 SQLite (作業步驟 1~4)"""
+def process_local_json_to_db():
+    """讀取本地 JSON -> 解析 -> 存入 SQLite"""
     
-    # 1️⃣ 下載 JSON 資料
-    response = requests.get(JSON_URL)
-    if response.status_code != 200:
-        st.error(f"下載失敗，狀態碼：{response.status_code}")
+    # 1. 檢查檔案是否存在
+    if not os.path.exists(JSON_FILE_NAME):
+        st.error(f"❌ 找不到檔案：{JSON_FILE_NAME}，請確認它是否在 app.py 旁邊。")
         return False
-    
-    data = response.json()
-    
-    # 建立資料列表準備寫入
-    weather_records = []
 
     try:
-        # 2️⃣ 解析資料 (針對 F-A0010-001 的結構)
-        # 資料結構通常是: cwaopendata -> dataset -> locations -> location (list)
-        locations = data['cwaopendata']['dataset']['locations']['location']
+        # 2. 讀取本地 JSON 檔案
+        with open(JSON_FILE_NAME, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        # 3. 解析資料 (針對 F-A0010-001 結構)
+        # 結構通常是: cwaopendata -> dataset -> locations -> location
+        # 注意：不同 API 版本結構可能有微小差異，若報錯請檢查 JSON 根目錄
+        if 'cwaopendata' in data:
+            root = data['cwaopendata']['dataset']
+        else:
+            # 有些舊版或不同下載點的根目錄不同
+            root = data['records'] 
+
+        locations = root['locations']['location']
+        
+        weather_records = []
         
         for loc in locations:
-            city_name = loc.get('locationName', '未知') # 這裡通常是縣市或鄉鎮名
+            city_name = loc.get('locationName', '未知地區')
             
-            # 初始化變數
-            min_t = None
-            max_t = None
-            desc = None
+            min_t, max_t, desc = None, None, None
             
-            # 取出天氣元素 (Wx, MinT, MaxT)
-            # 我們只取「第一個時段」(time[0]) 做為示範
+            # 遍歷天氣因子 (MinT, MaxT, Wx)
             for element in loc['weatherElement']:
                 ele_name = element['elementName']
-                # 確保有時間區段資料
+                # 取第一筆時間段 (最近的預報)
                 if element['time']:
-                    first_slot = element['time'][0]
-                    value = first_slot['elementValue']['value']
+                    first_value = element['time'][0]['elementValue']
+                    # 有些格式是 list，有些是 dict，做個防呆
+                    val = first_value[0]['value'] if isinstance(first_value, list) else first_value['value']
                     
                     if ele_name == 'MinT':
-                        min_t = value
+                        min_t = val
                     elif ele_name == 'MaxT':
-                        max_t = value
-                    elif ele_name == 'Wx': # 天氣現象描述
-                        desc = value
+                        max_t = val
+                    elif ele_name == 'Wx':
+                        desc = val
             
-            # 整理一筆資料
             weather_records.append((city_name, min_t, max_t, desc))
             
-    except KeyError as e:
-        st.error(f"JSON 解析錯誤，欄位結構可能改變: {e}")
+    except Exception as e:
+        st.error(f"❌ JSON 解析失敗：{e}")
         return False
 
-    # 3️⃣ & 4️⃣ 設計資料庫並寫入 SQLite3
+    # 4. 存入 SQLite 資料庫
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # 建立 Table (如果不存在)
+    # 建立 Table
     c.execute('''
         CREATE TABLE IF NOT EXISTS weather (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,48 +76,43 @@ def fetch_and_save_data():
         )
     ''')
     
-    # 為了避免重複執行導致資料無限增加，我們先清空舊資料 (作業通常希望每次跑都是最新的)
+    # 清空舊資料 (避免重複)
     c.execute('DELETE FROM weather')
     
-    # 寫入資料
+    # 寫入新資料
     c.executemany('INSERT INTO weather (location, min_temp, max_temp, description) VALUES (?, ?, ?, ?)', weather_records)
     
     conn.commit()
     conn.close()
-    
     return True
 
-# --- Streamlit 介面區 (作業步驟 5) ---
+# --- Streamlit 介面 ---
+st.title("🌤️ 台灣鄉鎮天氣預報 (Local JSON 版)")
 
-st.title("🌤️ 台灣各地鄉鎮天氣預報 (作業 Part 1)")
+st.write("### 作業 Part 1：解析本地 JSON 並存入資料庫")
 
-# 建立一個按鈕來觸發「下載與更新資料庫」的動作
-if st.button("更新資料庫 (從 CWA API 下載)"):
-    with st.spinner("正在下載並解析資料..."):
-        success = fetch_and_save_data()
-        if success:
-            st.success("✅ 資料庫更新成功！已存入 data.db")
-        else:
-            st.error("❌ 更新失敗")
+# 操作按鈕
+if st.button("🚀 讀取 JSON 並寫入資料庫"):
+    if process_local_json_to_db():
+        st.success("✅ 成功！資料已解析並存入 data.db")
+        st.balloons()
 
-# 5️⃣ 顯示從 SQLite 讀出的資料表格
+# 顯示資料庫內容
 if os.path.exists(DB_NAME):
-    st.subheader("📊 資料庫內容預覽")
+    st.subheader("📊 資料庫目前的內容 (data.db)")
     
-    # 連接資料庫讀取資料
     conn = sqlite3.connect(DB_NAME)
-    
-    # 使用 Pandas 讀取 SQL (這是顯示表格最快的方法)
-    df = pd.read_sql("SELECT * FROM weather", conn)
-    conn.close()
-    
-    if not df.empty:
-        # 顯示 Dataframe
-        st.dataframe(df, use_container_width=True)
-        
-        # 額外加分題：簡單的統計數據
-        st.info(f"目前資料庫中共有 {len(df)} 筆鄉鎮天氣資料。")
-    else:
-        st.warning("資料庫是空的，請點擊上方按鈕更新資料。")
+    # 用 Pandas 讀取最漂亮
+    try:
+        df = pd.read_sql("SELECT * FROM weather", conn)
+        if not df.empty:
+            st.dataframe(df, use_container_width=True)
+            st.info(f"共讀取到 {len(df)} 筆資料")
+        else:
+            st.warning("資料庫目前是空的，請點擊上方按鈕載入資料。")
+    except Exception as e:
+        st.warning("尚未建立資料表。")
+    finally:
+        conn.close()
 else:
-    st.warning("找不到 data.db，請點擊上方按鈕建立資料庫。")
+    st.info("👈 請點擊按鈕開始處理資料")
